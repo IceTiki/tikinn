@@ -42,6 +42,7 @@ class RunParams:
         criterion: _nn.Module = None,
         optimizer: _opt.Optimizer = None,
         scheduler: _lr_sche.LRScheduler = None,
+        score: float = float("-inf"),
         taskname: str = "",
         arch_info: dict[str, str] = None,
         comments: dict = None,
@@ -59,6 +60,8 @@ class RunParams:
             optimizer, optional if for validate.
         scheduler: torch.optim.lr_scheduler.LRScheduler, default = None
             scheduler, optional.
+        score : float, default = float("-inf")
+            score of the model. Which always positive correlation with accuracy and negetive correlation with loss.
         taskname : str
             name of task, for logging.
         arch_info : dict[str, str], default = {}
@@ -73,6 +76,7 @@ class RunParams:
         self.optimizer: _opt.Optimizer = optimizer
         self.scheduler: _lr_sche.LRScheduler = scheduler
 
+        self.score: float = score
         self.taskname: str = taskname
         self.arch_info: str = {} if arch_info is None else arch_info
         self.comments: dict = {} if comments is None else comments
@@ -101,6 +105,7 @@ class RunParams:
         """
         Save parameters to file.
         """
+
         def get_state_dict(item) -> None | dict[str, _typing.Any]:
             return None if item is None else item.state_dict()
 
@@ -258,11 +263,17 @@ class ModelHandler(_typing.Protocol):
     def do_epoch(self):
         """
         Do a epoch.
+
+        1. get `batch_data` from `self.dataloader`.
+        2. call `iteration_forward(batch_data)` for calculating loss.
+        3. call `iteration_backward(loss)` for backward.
+        4. update `run_params.score`.
         """
         for batch_data in self.dataloader:
             # batch_train
             loss = self.iteration_forward(batch_data)
             self.iteration_backward(loss)
+            self.run_params.score = -loss.item()
 
     def iteration_forward(self, batch_data: _typing.Any) -> _torch.Tensor:
         """
@@ -326,170 +337,143 @@ class ModelHandler(_typing.Protocol):
 
 
 class Meter:
-    """
-    In short, it is used to count average. And, it save all the values (and weights).
-    """
+    class MeterArray:
+        def __init__(
+            self,
+            *,
+            alias="",
+            fmt=":.4e",
+            summary_type: _typing.Literal["avg", "sum"] = "avg",
+        ) -> None:
+            self.__values: list[float] = []
+            self.__weights: list[float] = []
+            self.fmt = fmt
+            self.alias = alias
+            self.summary_type = summary_type
 
-    def __init__(self, name: str = "meter", fmt: str = ":f") -> None:
-        """
-        Used to save values, and output formated average.
+        def add(self, value: float | tuple[float, float]):
+            if isinstance(value, float):
+                self.__values.append(value)
+                self.__weights.append(1)
+            elif isinstance(value, tuple) and len(value) == 2:
+                value, weight = value
+                self.__values.append(value)
+                self.__weights.append(weight)
+            else:
+                raise ValueError(value)
+            return self
 
-        Parameters
-        ---
-        name : str, default = "meter"
-            name of meter
-        fmt : str, default = ":f"
-            how to formating data
-        """
-        self.name: str = name
-        self.fmt = fmt
-        self.reset()
+        def __iadd__(self, value: float | tuple[float, float]):
+            return self.add(value)
 
-    def __str__(self) -> str:
-        fmtstr = "{name}={val%s}({avg%s})" % (self.fmt, self.fmt)
-        return fmtstr.format(
-            **{"name": self.name, "val": self.__value_new, "avg": self.average}
-        )
+        @property
+        def datas(self) -> dict[_typing.Literal["values", "weights"], list[float]]:
+            return {"values": self.__values.copy(), "weights": self.__weights.copy()}
 
-    @property
-    def average(self) -> float:
-        return self.sum / sum(self.__weights)
+        @property
+        def avg(self) -> float:
+            return self.sum / sum(self.__weights)
 
-    @property
-    def sum(self) -> float:
-        return sum((i * j for i, j in zip(self.__values, self.__weights)))
+        @property
+        def sum(self) -> float:
+            return sum((i * j for i, j in zip(self.__values, self.__weights)))
 
-    @property
-    def values(self) -> list[float]:
-        return self.__values
+        @property
+        def value(self) -> float | None:
+            if self.__values:
+                return self.__values[-1]
+            return None
 
-    @property
-    def weights(self) -> list[float]:
-        return self.__weights
+        def __str__(
+            self,
+        ) -> str:
+            """
+            Returns
+            ---
+            str :
+                {alias}={value:fmt}({summary:fmt})
 
-    @property
-    def summary(self) -> str:
-        fmtstr = "{name}={avg%s}" % self.fmt
-        return fmtstr.format(
-            **{"name": self.name, "val": self.__value_new, "avg": self.average}
-        )
+            Examples
+            ---
+            >>> ma = MeterArray(alias="loss", fmt=":.4e", summary_type="avg")
+            >>> ma += 1.2  # add new value to loss, weight = 1
+            >>> ma += (3.4, 5.6)  # add new value to loss, weight = 5.6
+            >>> print(ma.avg)  # (1.2*1 + 3.4*5.6) / (1+5.6) = 3.067
+            <<< 3.0666666666666664
+            >>> print(ma)
+            <<< loss=3.4000e+00(3.0667e+00)
+            """
+            fmtstr = "{alias}={val%s}({summary%s})" % (self.fmt, self.fmt)
+            match self.summary_type:
+                case "avg":
+                    meter_summary = self.avg
+                case "sum":
+                    meter_summary = self.sum
 
-    def add(self, value: float, weight: float = 1):
-        """
-        save new value and weight
+            return fmtstr.format(
+                **{"alias": self.alias, "val": self.value, "summary": meter_summary}
+            )
 
-        Parameters
-        ---
-        value : float
-            value
-        weight : float, default = 1
-            weight of value
-        """
-        self.__value_new = value
-        self.__values.append(float(value))
-        self.__weights.append(float(weight))
-
-    def __iadd__(self, args: float) -> _typing.Self:
-        assert len(args) in (0, 1)
-        args = map(float, args)
-
-        self.add(*args)
-        return self
-
-    @_typing.overload
-    def __iadd__(self, value: float) -> _typing.Self:
-        ...
-
-    @_typing.overload
-    def __iadd__(self, value_and_weights: tuple[float, float]) -> _typing.Self:
-        ...
-
-    def reset(self):
-        """
-        reset all the values and weights
-        """
-        self.__value_new = float
-        self.__values: list[float] = []
-        self.__weights: list[float] = []
-
-
-class RunTracer:
-    """
-    Trace the model running status.
-    - model running time
-    - data loading time
-    - loss
-    - accuracy 1
-    - accuracy 5
-    """
+    meters: dict[str, MeterArray]
 
     def __init__(
         self,
-        num_batches: int,
-        prefix: str = "",
     ) -> None:
-        """
-        Parameters
-        ---
-        num_batches : int
-            number of batch, equal to len(DataLoader)
-        prefix : str
-            prefix, used to output to logger.
-        """
-        self._model_time = Meter("model", ":6.3f")  # time of model dealing the Tensor
-        self._load_time = Meter("load", ":6.3f")  # time of dataloader load the data
-        self._losses = Meter("loss", ":.4e")  # loss
-        self._acc1 = Meter("acc1", ":6.2f")  # accuracy 1
-        self._acc5 = Meter("acc5", ":6.2f")  # accuracy 5
+        self.meters = {}
 
-        self.prefix = prefix
-        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
-
-    @property
-    def meters(self) -> tuple[Meter]:
+    def __getitem__(self, key: str) -> MeterArray:
         """
-        return all the meters in this instants.
-        """
-        return (self._model_time, self._load_time, self._losses, self._acc1, self._acc5)
+        MeterArray have been implemented `__iadd__` method.
 
-    @property
-    def data(self) -> dict[str, dict[str, list[float]]]:
-        return {i.name: {"values": i.values, "weights": i.weights} for i in self.meters}
-
-    @property
-    def aver_acc1(self) -> float:
-        return self._acc1.average
-
-    @property
-    def aver_loss(self) -> float:
-        return self._losses.average
-
-    def log(self, batch) -> None:
-        """
-        output status to logger.debug
-        """
-        entries = [self.prefix + self.batch_fmtstr.format(batch)]
-        entries.extend(map(str, self.meters))
-        _logger.debug(" ".join(entries))
-
-    def log_summary(self) -> None:
-        """
-        output summary to logger.debug
-        """
-        entries = [f"* {self.prefix}"]
-        entries.extend(map(lambda x: x.summary, self.meters))
-        _logger.debug(" ".join(entries))
-
-    def _get_batch_fmtstr(self, num_batches: int) -> str:
-        """
         Examples
         ---
-        >>> _get_batch_fmtstr(234)
-        <<< "[{:3d}/234]"
+        >>> m = Meter()
+        >>> m["loss"] += 1.2  # add new value to loss, weight = 1
+        >>> m["loss"] += (3.4, 5.6)  # add new value to loss, weight = 5.6
+        >>> print(m["loss"].avg)  # (1.2*1 + 3.4*5.6) / (1+5.6) = 3.067
+        <<< 3.0666666666666664
         """
-        num_digits = len(str(num_batches // 1))
-        fmt = "{:" + str(num_digits) + "d}"
-        return "[" + fmt + "/" + fmt.format(num_batches) + "]"
+        if key not in self.meters:
+            self.meters[key] = self.MeterArray(alias=key)
+        return self.meters[key]
+
+    def __setitem__(self, key: str, value: MeterArray):
+        self.meters[key] = value
+
+    def keys(self):
+        return self.meters.keys()
+
+    def values(self):
+        return self.meters.values()
+
+    def items(self):
+        return self.meters.items()
+
+    def as_dict(
+        self,
+    ) -> dict[str, dict[_typing.Literal["values", "weights"], list[float]]]:
+        """
+        Return all the data in meter_array.
+        """
+        return {k: v.datas for k, v in self.meters.items()}
+
+    def add_meter(
+        self,
+        key: str,
+        *,
+        alias=None,
+        fmt=":.4e",
+        summary_type: _typing.Literal["avg", "sum"] = "avg",
+    ):
+        alias = key if alias is None else alias
+        self.meters[key] = self.MeterArray(
+            alias=alias,
+            fmt=fmt,
+            summary_type=summary_type,
+        )
+
+    def __str__(self) -> str:
+        return "\t".join(map(str, self.meters.values()))
 
 
 class ImageClassifyHandler(ModelHandler, _typing.Protocol):
@@ -501,7 +485,7 @@ class ImageClassifyHandler(ModelHandler, _typing.Protocol):
     >>>     pass
     """
 
-    tracers: list[RunTracer]
+    meters: list[Meter]
 
     def __init__(
         self,
@@ -514,7 +498,7 @@ class ImageClassifyHandler(ModelHandler, _typing.Protocol):
         callbacks: list[_typing.Callable[[_typing.Self], None]] = None,
     ) -> None:
         super().__init__(train, run_params, dataloader, device, callbacks)
-        self.tracers: list[RunTracer] = []
+        self.meters: list[Meter] = []
 
     @staticmethod
     def accuracy(
@@ -552,23 +536,29 @@ class ImageClassifyHandler(ModelHandler, _typing.Protocol):
             return res
 
     @property
-    def tracer(self) -> RunTracer:
-        if self.tracers:
-            return self.tracers[-1]
-        else:
-            tracer = RunTracer(
-                len(self.dataloader),
-                f"{self.train} {self.run_params.taskname}: ",
-            )
-            self.tracers.append(tracer)
-            return tracer
+    def meter(self) -> Meter:
+        key = "meter"
+        if key not in self.__privates:
+            new_meter = Meter()
+            self.__privates[key] = new_meter
+            self.meters.append(new_meter)
+        return self.__privates[key]
 
-    @tracer.setter
-    def tracer(self, new_tracer):
-        self.tracers.append(new_tracer)
+    @meter.setter
+    def meter(self, new_meter):
+        key = "meter"
+        self.__privates[key] = new_meter
+        self.meters.append(new_meter)
 
     def do_epoch(self):
-        tracer = self.tracer
+        meter = self.meter
+
+        meter.add_meter("model", fmt=":6.3f")  # time of model dealing the Tensor
+        meter.add_meter("load", fmt=":6.3f")  # time of dataloader load the data
+        meter.add_meter("loss", fmt=":.4e")  # loss
+        meter.add_meter("acc1", fmt=":6.2f")  # accuracy 1
+        meter.add_meter("acc5", fmt=":6.2f")  # accuracy 5
+
         run_params = self.run_params
         dataloader = self.dataloader
 
@@ -582,18 +572,21 @@ class ImageClassifyHandler(ModelHandler, _typing.Protocol):
             images, target = batch_data
             images: _torch.Tensor = images.to(self.device, non_blocking=True)
             target: _torch.Tensor = target.to(self.device, non_blocking=True)
-            tracer._load_time.add(_time.time() - time_anchor)
+            meter["load"] += _time.time() - time_anchor
 
             # batch_train
-            yield (images, target)
+            loss = self.iteration_forward(images, target)
+            self.iteration_backward(loss)
 
             # measure elapsed time
-            tracer._model_time.add(_time.time() - time_anchor)
+            meter["model"] += _time.time() - time_anchor
             time_anchor = _time.time()
 
-            bar_dataloader.desc = f"{run_params.taskname}[{run_params.epoch}](acc={tracer.aver_acc1:6.4f}|loss={tracer.aver_loss:.4e})"
+            bar_dataloader.desc = f"{run_params.taskname}[{run_params.epoch}](acc={meter['acc1'].avg:6.4f}|loss={meter['loss'].avg:.4e})"
 
-        tracer.log_summary()
+            self.run_params.score = meter["acc1"].avg
+
+        _logger.debug(f"[{self.run_params.epoch}] {meter}")
 
     def iteration_forward(
         self, batch_data: tuple[_torch.Tensor, _torch.Tensor]
@@ -613,7 +606,7 @@ class ImageClassifyHandler(ModelHandler, _typing.Protocol):
         """
         images, target = batch_data
         run_params = self.run_params
-        tracer = self.tracer
+        meter = self.meter
 
         model: _nn.Module = run_params.model
         criterion: _nn.Module = run_params.criterion
@@ -625,7 +618,7 @@ class ImageClassifyHandler(ModelHandler, _typing.Protocol):
 
         # measure accuracy and record loss
         acc1, acc5 = self.accuracy(output, target, top_k=(1, 5))
-        tracer._losses.add(loss.item(), images.shape[0])
-        tracer._acc1.add(acc1[0], images.shape[0])
-        tracer._acc5.add(acc5[0], images.shape[0])
+        meter["loss"] += (loss.item(), images.shape[0])
+        meter["acc1"] += (acc1[0], images.shape[0])
+        meter["acc5"] += (acc5[0], images.shape[0])
         return loss
