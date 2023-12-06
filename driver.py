@@ -1,20 +1,10 @@
-"""
-This file may publish to IceTiki@github later, I'm not quite sure which repository I choice, may be tikilib.
-And this file also used to do my CV homework in 2023/11.
-
-Usage
----
->>> from (model_name) import RunHandler, RunParams, RunTracer
-"""
 import time as _time
 import typing as _typing
-import dataclasses as _dataclasses
-import json as _json
 import pathlib as _pathlib
+
 
 from loguru import logger as _logger
 import tqdm as _tqdm
-
 import torch as _torch
 import torch.utils.data as _tc_data
 import torch.nn as _nn
@@ -23,15 +13,316 @@ import torch.optim.lr_scheduler as _lr_sche
 import torchvision.models as _tvmodels
 
 
-@_dataclasses.dataclass
 class RunParams:
-    model: _nn.Module
-    dataloader: _tc_data.DataLoader = None
-    criterion: _nn.Module = None
-    optimizer: _opt.Optimizer = None
-    scheduler: _lr_sche.LRScheduler = None
-    arch: str = None
-    device: _torch.device = _torch.device("cuda")
+    """
+    Parameters for trainning.
+    1. model
+    2. epoch
+    3. criterion
+    4. optimizer
+    ...
+
+    For easy save and easy load from file.
+    """
+
+    VERSION = "1.0.0"
+
+    _STATE_ATTR_KEY: tuple[str] = (
+        "model",
+        "model",
+        "optimizer",
+        "criterion",
+        "scheduler",
+    )
+
+    def __init__(
+        self,
+        model: _nn.Module,
+        epoch_range: range,
+        criterion: _nn.Module = None,
+        optimizer: _opt.Optimizer = None,
+        scheduler: _lr_sche.LRScheduler = None,
+        taskname: str = "",
+        arch_info: dict[str, str] = None,
+        comments: dict = None,
+    ) -> None:
+        """
+        Parameters
+        ---
+        model : torch.nn.Module
+            model.
+        epoch_range : range
+            epoch range.
+        criterion : torch.nn.Module, default = None
+            criterion, it always be a loss function.
+        optimizer : torch.optim.Optimizer, default = None
+            optimizer, optional if for validate.
+        scheduler: torch.optim.lr_scheduler.LRScheduler, default = None
+            scheduler, optional.
+        taskname : str
+            name of task, for logging.
+        arch_info : dict[str, str], default = {}
+            Info of model, optimizer...
+        comments : dict, default = {}
+            comments.
+        """
+        self.model: _nn.Module = model
+        self.epoch_range: range = epoch_range
+
+        self.criterion: _nn.Module = criterion
+        self.optimizer: _opt.Optimizer = optimizer
+        self.scheduler: _lr_sche.LRScheduler = scheduler
+
+        self.taskname: str = taskname
+        self.arch_info: str = {} if arch_info is None else arch_info
+        self.comments: dict = {} if comments is None else comments
+        # ===
+        self.reset_epoch()
+
+    @property
+    def epoch(self) -> int:
+        return self.__epoch
+
+    def next_epoch(self) -> int | None:
+        try:
+            self.__epoch = next(self.__epoch_iter)
+            return self.__epoch
+        except StopIteration:
+            return None
+
+    def reset_epoch(self):
+        """
+        Reset epoch and epoch_iter.
+        """
+        self.__epoch: int = self.epoch_range.start
+        self.__epoch_iter: _typing.Iterable[int] = iter(self.epoch_range)
+
+    def save(self, file_like: _pathlib.Path):
+        """
+        Save parameters to file.
+        """
+        def get_state_dict(item) -> None | dict[str, _typing.Any]:
+            return None if item is None else item.state_dict()
+
+        data = {
+            "epoch": self.__epoch,
+            "epoch_range": self.epoch_range,
+            "taskname": self.taskname,
+            "arch_info": self.arch_info,
+            "comments": self.comments,
+            "version": self.VERSION,
+        }
+
+        data.update({k: get_state_dict(self.__dict__[k]) for k in self._STATE_ATTR_KEY})
+
+        # saving model
+        _torch.save(data, file_like)
+
+    def load(self, file_like: _pathlib.Path):
+        """
+        Load parameters form file.
+        """
+        loaded: dict = _torch.load(file_like)
+
+        self.epoch_range: range = loaded["range"]
+        self.__epoch: int = loaded["epoch"]
+        self.__epoch_iter: _typing.Iterable[int] = iter(
+            range(
+                self.__epoch + self.epoch_range.step,
+                self.epoch_range.stop,
+                self.epoch_range.step,
+            )
+        )
+
+        self.taskname = loaded["taskname"]
+        self.arch_info = loaded["arch_info"]
+        self.comments = loaded["comments"]
+
+        # load state dict
+        for k in self._STATE_ATTR_KEY:
+            if loaded.get(k) is None:
+                continue
+            if self.__dict__[k] is None:
+                # TODO, arch init
+                raise RuntimeError(f"Unable to update {k}.")
+            self.__dict__[k].load_state_dict(loaded[k])
+
+
+class ModelHandler(_typing.Protocol):
+    """
+    You need to implement `iteration_forward` by you self.
+
+    Examples
+    ---
+    >>> handler = ModelHandler(*args, **kwargs)
+    >>> for _ in handler:
+    >>>     pass
+    """
+
+    train: bool
+    run_params: RunParams
+    dataloader: _tc_data.DataLoader
+    device: _torch.device
+    callbacks: list[_typing.Callable[[_typing.Self], None]]
+    __privates: dict[str, _typing.Any]
+
+    def __init__(
+        self,
+        train: bool,
+        run_params: RunParams,
+        dataloader: _tc_data.DataLoader,
+        device: _torch.device = _torch.device("cuda")
+        if _torch.cuda.is_available()
+        else _torch.device("cpu"),
+        callbacks: list[_typing.Callable[[_typing.Self], None]] = None,
+    ) -> None:
+        """
+        Parameters
+        ---
+        train : bool
+            Train of Vaildate
+        run_params : RunParams
+            Parameters for running.
+        dataloader : Dataloader
+            dataloader.
+        callbacks : list[(Self) -> None], default = []
+            callback function, execute for each epoch at end.
+        device : torch.device, default = device("cuda") | device("cpu")
+            If cuda avilable, default is device("cuda") else device("cpu").
+        """
+        assert train in ("train", "validate")
+        self.train: bool = train
+        self.run_params: RunParams = run_params
+        self.dataloader: _tc_data.DataLoader = dataloader
+        self.device: _torch.device = device
+        self.callbacks: list[_typing.Callable[[_typing.Self], None]] = (
+            [] if callbacks is None else callbacks
+        )
+        self.__privates: dict[str, _typing.Any] = {}
+
+    def __len__(self) -> int:
+        """
+        Epoch number.
+        """
+        return len(self.run_params.epoch_range)
+
+    def __iter__(self) -> _typing.Self:
+        """
+        Do each Epoch.
+        """
+        return self
+
+    def __next__(self) -> None:
+        """
+        Do a epoch.
+
+        Notions
+        ---
+        When you call this function
+        1. model will automatic switch to `train` or `eval` mode
+            , and automatic `set grad enabled` or not.
+        2. call method `do_epoch`.
+        3. do `scheduler.step()` if in train mode.
+        4. call `callbacks`.
+
+        Raises
+        ---
+        StopIteration
+            If run_params get the last epoch, then, raise StopIteration.
+        """
+        run_params: RunParams = self.run_params
+
+        if run_params.next_epoch() is None:
+            raise StopIteration("Epoch end.")
+
+        run_params: RunParams = self.run_params
+        if self.train:
+            # switch to train mode
+            run_params.model.train()
+        else:
+            # switch to evaluate mode
+            run_params.model.eval()
+
+        # do epoch
+        with _torch.set_grad_enabled(self.train):
+            self.do_epoch()
+
+        # scheduler
+        if run_params.scheduler is not None and self.train:
+            run_params.scheduler.step()
+
+        # callbacks
+        for callback in self.callbacks:
+            callback(self)
+
+    def do_epoch(self):
+        """
+        Do a epoch.
+        """
+        for batch_data in self.dataloader:
+            # batch_train
+            loss = self.iteration_forward(batch_data)
+            self.iteration_backward(loss)
+
+    def iteration_forward(self, batch_data: _typing.Any) -> _torch.Tensor:
+        """
+        Forward part of a iteration.
+
+        Parameters
+        ---
+        batch_data : Any
+            self.dataloader yielded.
+
+        Returns
+        ---
+        loss : Tensor
+            return loss, for backward.
+        """
+        raise NotImplementedError("You should implemented method `iteration_forward`.")
+        # example code for image classify.
+        images, target = batch_data
+        run_params = self.run_params
+
+        model: _nn.Module = run_params.model
+        criterion: _nn.Module = run_params.criterion
+        optimizer: _opt.Optimizer = run_params.optimizer
+        device: _torch.device = device
+
+        # move data to the same device as model
+        images: _torch.Tensor = images.to(device, non_blocking=True)
+        target: _torch.Tensor = target.to(device, non_blocking=True)
+
+        # compute output
+        output: _torch.Tensor = model(images)
+        loss: _torch.Tensor = criterion(output, target)
+        return loss
+
+    def iteration_backward(self, loss: _torch.Tensor) -> None:
+        """
+        Backward part of a iteration.
+
+        Parameters
+        ---
+        loss : Tensor
+            loss, for backward.
+        """
+        if self.train:
+            optimizer: _opt.Optimizer = self.run_params.optimizer
+            # compute gradient and do optimizer step
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+    def add_callback(self, callback: _typing.Callable[[_typing.Self], None]):
+        """
+        Add callback function, callback funtion will run at epoch end.
+
+        Parameters
+        ---
+        callback : (Self) -> None
+            callback function.
+        """
+        self.callbacks.append(callback)
 
 
 class Meter:
@@ -201,47 +492,29 @@ class RunTracer:
         return "[" + fmt + "/" + fmt.format(num_batches) + "]"
 
 
-class EpochHandler:
+class ImageClassifyHandler(ModelHandler, _typing.Protocol):
     """
-    Use to train or validate model in single epoch.
+    Examples
+    ---
+    >>> handler = CallbackHandler(*args, **kwargs)
+    >>> for _ in handler:
+    >>>     pass
     """
 
-    class _EmptyWith:
-        def __init__(self) -> None:
-            pass
-
-        def __enter__(self, *args, **kwargs) -> None:
-            pass
-
-        def __exit__(self, *args, **kwargs) -> None:
-            pass
+    tracers: list[RunTracer]
 
     def __init__(
         self,
-        epoch: int,
         train: bool,
         run_params: RunParams,
-        name: str = "Run",
+        dataloader: _tc_data.DataLoader,
+        device: _torch.device = _torch.device("cuda")
+        if _torch.cuda.is_available()
+        else _torch.device("cpu"),
+        callbacks: list[_typing.Callable[[_typing.Self], None]] = None,
     ) -> None:
-        """
-        epoch : int
-            Which epoch is now. Just for logger output.
-        train : bool
-            If train is True, then, use params for training. Else, just validating.
-        run_params : RunParams
-            Parameters for running.
-        name : str, default = "Run"
-            Name, just for logger output.
-        """
-        self.epoch: int = epoch
-        self.train: bool = train
-        self.run_params = run_params
-        self.name: str = name
-
-        self.tracer = RunTracer(
-            len(self.run_params.dataloader),
-            f"{'Train' if self.train else 'Valid'} {self.name}: ",
-        )
+        super().__init__(train, run_params, dataloader, device, callbacks)
+        self.tracers: list[RunTracer] = []
 
     @staticmethod
     def accuracy(
@@ -249,6 +522,7 @@ class EpochHandler:
     ) -> list[_torch.Tensor]:
         """
         Computes the accuracy over the k top predictions for the specified values of k
+
         Parameters
         ---
         output : torch.Tensor
@@ -261,7 +535,7 @@ class EpochHandler:
         Returns
         ---
         list[torch.Tensor]
-            scalar float tensor
+            scalar float tensor, top k accuracy.
         """
         with _torch.no_grad():
             maxk = max(top_k)
@@ -277,64 +551,73 @@ class EpochHandler:
                 res.append(correct_k.mul_(100.0 / batch_size))
             return res
 
-    def run(self) -> RunTracer:
-        """
-        Run the epoch!
-        """
-        trace: RunTracer = self.tracer
-        time_anchor = _time.time()
-
-        dataloader: _tc_data.DataLoader = self.run_params.dataloader
-        model: _nn.Module = self.run_params.model
-
-        if self.train:
-            # switch to train mode
-            model.train()
+    @property
+    def tracer(self) -> RunTracer:
+        if self.tracers:
+            return self.tracers[-1]
         else:
-            # switch to evaluate mode
-            model.eval()
+            tracer = RunTracer(
+                len(self.dataloader),
+                f"{self.train} {self.run_params.taskname}: ",
+            )
+            self.tracers.append(tracer)
+            return tracer
 
-        with self._EmptyWith() if self.train else _torch.no_grad():
-            bar = _tqdm.tqdm(dataloader, desc=f"{self.name}[{self.epoch}]")
-            for loader_yield in bar:
-                # measure data loading time
-                trace._load_time.add(_time.time() - time_anchor)
+    @tracer.setter
+    def tracer(self, new_tracer):
+        self.tracers.append(new_tracer)
 
-                # batch_train
-                self.__batch_run(loader_yield)
+    def do_epoch(self):
+        tracer = self.tracer
+        run_params = self.run_params
+        dataloader = self.dataloader
 
-                # measure elapsed time
-                trace._model_time.add(_time.time() - time_anchor)
-                time_anchor = _time.time()
+        time_anchor = _time.time()
+        bar_dataloader = _tqdm.tqdm(
+            dataloader, desc=f"{run_params.taskname}[{run_params.epoch}]"
+        )
 
-                bar.desc = f"{self.name}[{self.epoch}](acc={trace.aver_acc1:6.4f}|loss={trace.aver_loss:.4e})"
+        for batch_data in dataloader:
+            # move data to the same device as model
+            images, target = batch_data
+            images: _torch.Tensor = images.to(self.device, non_blocking=True)
+            target: _torch.Tensor = target.to(self.device, non_blocking=True)
+            tracer._load_time.add(_time.time() - time_anchor)
 
-        trace.log_summary()
-        return trace
+            # batch_train
+            yield (images, target)
 
-    def __batch_run(
-        self,
-        batch_data: _typing.Any,
-    ):
+            # measure elapsed time
+            tracer._model_time.add(_time.time() - time_anchor)
+            time_anchor = _time.time()
+
+            bar_dataloader.desc = f"{run_params.taskname}[{run_params.epoch}](acc={tracer.aver_acc1:6.4f}|loss={tracer.aver_loss:.4e})"
+
+        tracer.log_summary()
+
+    def iteration_forward(
+        self, batch_data: tuple[_torch.Tensor, _torch.Tensor]
+    ) -> _torch.Tensor:
         """
-        Run for a batch of data.
+        Forward part of a iteration.
 
         Parameters
         ---
-        batch_data : Any
-            self.dataloader yielded
+        batch_data : tuple[Tensor, Tensor]
+            self.dataloader yielded. Images and labels.
+
+        Returns
+        ---
+        loss : Tensor
+            return loss, for backward.
         """
-        tracer = self.tracer
         images, target = batch_data
+        run_params = self.run_params
+        tracer = self.tracer
 
-        model: _nn.Module = self.run_params.model
-        criterion: _nn.Module = self.run_params.criterion
-        optimizer: _opt.Optimizer = self.run_params.optimizer
-        device: _torch.device = self.run_params.device
-
-        # move data to the same device as model
-        images: _torch.Tensor = images.to(device, non_blocking=True)
-        target: _torch.Tensor = target.to(device, non_blocking=True)
+        model: _nn.Module = run_params.model
+        criterion: _nn.Module = run_params.criterion
+        device: _torch.device = device
 
         # compute output
         output = model(images)
@@ -342,194 +625,7 @@ class EpochHandler:
 
         # measure accuracy and record loss
         acc1, acc5 = self.accuracy(output, target, top_k=(1, 5))
-        tracer._losses.add(loss.item(), images.size(0))
-        tracer._acc1.add(acc1[0], images.size(0))
-        tracer._acc5.add(acc5[0], images.size(0))
-
-        if self.train:
-            # compute gradient and do optimizer step
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-
-class RunHandler:
-    """
-    Use to train or validate model.
-    """
-
-    def __init__(
-        self,
-        train: bool,
-        run_params: RunParams,
-        epoch_range: range = range(30),
-        name: str = "",
-    ) -> None:
-        """
-        Parameters
-        ---
-        train : bool
-
-        """
-        self.train: bool = train
-        self.name: str = name
-        self.__run_params: RunParams = run_params
-        self.__epoch_range: range = epoch_range
-
-        self.__epoch: int = None
-        self.__last_tracer: RunTracer = None
-        self.__tracers: list[RunTracer] = []
-        self.callbacks: list[_typing.Callable[[_typing.Self], None]] = []
-
-    @property
-    def is_train_end(self) -> bool:
-        """
-        Returns
-        ---
-        bool
-            If this epoch is last epoch, return True. Else, return False.
-        """
-        epoch = self.epoch
-        step = self.__epoch_range.step
-        stop = self.__epoch_range.stop
-        return (stop - epoch) * (stop - (epoch + step)) <= 0
-
-    @property
-    def epoch_range(self) -> range:
-        return self.__epoch_range
-
-    @property
-    def run_params(self) -> RunParams:
-        return self.__run_params
-
-    @property
-    def epoch(self) -> int:
-        return self.__epoch
-
-    @property
-    def tracer_data(self) -> list[dict[str, dict[str, list[float]]]]:
-        return [i.data for i in self.__tracers]
-
-    @property
-    def tracers(self) -> list[RunTracer]:
-        return self.__tracers
-
-    @property
-    def last_tracer(self) -> RunTracer:
-        return self.__last_tracer
-
-    @property
-    def tracer_json(self) -> str:
-        return _json.dumps(self.tracer_data, ensure_ascii=False)
-
-    def __len__(self):
-        return len(self.__epoch_range)
-
-    def __iter__(self) -> _typing.Generator[RunTracer, None, None]:
-        """
-        Running for each epochs.
-
-        Yields
-        ---
-        RunTracer
-        """
-        return self.run()
-
-    def __callback(self):
-        """run all the callback function"""
-        for callback in self.callbacks:
-            callback(self)
-
-    def add_callback(self, func: _typing.Callable[[_typing.Self], None]):
-        self.callbacks.append(func)
-
-    def run(self) -> _typing.Generator[RunTracer, None, None]:
-        """
-        Running for each epochs.
-
-        Yields
-        ---
-        RunTracer
-
-        Examples
-        ---
-        >>> for tracer in RunHandler(...):
-        >>>     ...
-        """
-        for epoch in self.__epoch_range:
-            self.__epoch = epoch
-
-            tracer: RunTracer = EpochHandler(
-                epoch,
-                self.train,
-                run_params=self.__run_params,
-                name=self.name,
-            ).run()
-
-            scheduler = self.run_params.scheduler
-            if scheduler is not None and not self.train:
-                scheduler.step()
-
-            self.__tracers.append(tracer)
-            self.__last_tracer = tracer
-            self.__callback()
-            yield tracer
-
-    def run_all(self) -> tuple[RunTracer]:
-        return tuple(i for i in self)
-
-    def save(self, path: _pathlib.Path, comments: str = ""):
-        path = _pathlib.Path(path)
-
-        model = self.run_params.model
-        optimizer = self.run_params.optimizer
-        scheduler = self.run_params.scheduler
-        arch = self.run_params.arch
-        epoch = self.epoch
-
-        data = {
-            "epoch": epoch,
-            "arch": arch,
-            "state_dict": model.state_dict(),
-            "comments": comments,
-        }
-
-        data["optimizer"] = optimizer.state_dict() if optimizer is not None else None
-        data["scheduler"] = scheduler.state_dict() if scheduler is not None else None
-        data["acc1"] = (
-            self.last_tracer.aver_acc1 if self.last_tracer is not None else None
-        )
-
-        # saving model
-        _torch.save(data, path)
-
-    def load(self, path: _pathlib.Path, load_epoch=False):
-        path = _pathlib.Path(path)
-        data: dict = _torch.load(path)
-
-        if load_epoch:
-            epoch = data["epoch"]
-            self.__epoch = epoch
-            old_range = self.__epoch_range
-            self.__epoch_range = range(
-                old_range.start + epoch + old_range.step,
-                old_range.stop + epoch + old_range.step,
-                old_range.step,
-            )
-
-        if data["state_dict"] is not None:
-            self.run_params.model.load_state_dict(data["state_dict"])
-
-        if (
-            data.get("optimizer", None) is not None
-            and self.run_params.optimizer is not None
-        ):
-            self.run_params.optimizer.load_state_dict(data["optimizer"])
-
-        if (
-            data.get("scheduler", None) is not None
-            and self.run_params.scheduler is not None
-        ):
-            self.run_params.scheduler.load_state_dict(data["optimizer"])
-
-        return data.get("comments", "")
+        tracer._losses.add(loss.item(), images.shape[0])
+        tracer._acc1.add(acc1[0], images.shape[0])
+        tracer._acc5.add(acc5[0], images.shape[0])
+        return loss
