@@ -72,11 +72,13 @@ class AutoPlot:
             values: list[list[float]] = [i[key]["values"] for i in datas]
             weights: list[list[float]] = [i[key]["weights"] for i in datas]
 
-            x_avg = _np.linspace(
-                first_epoch + epoch_step / 2, last_epoch + epoch_step / 2
+            x_avg = _np.arange(
+                first_epoch + epoch_step, last_epoch + 2 * epoch_step, epoch_step
             )
-            y_avg = [sum(i) / sum(j) for i, j in zip(values, weights)]
-
+            y_avg = [
+                float(sum(_np.array(i) * _np.array(j))) / sum(j)
+                for i, j in zip(values, weights)
+            ]
             self.plot_at_ax(
                 ax,
                 x_avg,
@@ -95,7 +97,7 @@ class AutoPlot:
             x_full = _np.interp(
                 list(_itertools.accumulate(flat_weights)),
                 sum_weights_accum,
-                _np.arange(first_epoch, last_epoch + epoch_step, epoch_step),
+                _np.arange(first_epoch, last_epoch + 2 * epoch_step, epoch_step),
             )
             y_full = flat_values
 
@@ -113,23 +115,43 @@ class AutoPlot:
 
         fig_width, fig_high = 18, 12
         figsize = (fig_width, fig_high)
-        figarea = fig_width * fig_high
-        nrows = _math.ceil(len(keys) / figarea * fig_high)
-        ncols = _math.ceil(len(keys) / figarea * fig_width)
-
-        assert nrows * ncols >= len(keys)
+        sqarea = len(keys) ** (1 / 2)
+        nrows = _math.ceil(sqarea * fig_width / fig_high)
+        ncols = _math.ceil(sqarea / fig_high * fig_width)
+        if fig_width > fig_high:
+            while 1:
+                if (ncols - 1) * nrows >= len(keys):
+                    ncols -= 1
+                elif ncols * (nrows - 1) >= len(keys):
+                    nrows -= 1
+                else:
+                    break
+            while 1:
+                if ncols * (nrows - 1) >= len(keys):
+                    nrows -= 1
+                elif (ncols - 1) * nrows >= len(keys):
+                    ncols -= 1
+                else:
+                    break
 
         fig, axs = _plt.subplots(
             nrows=nrows, ncols=ncols, figsize=figsize, constrained_layout=True
         )
 
-        for key, ax in zip(keys, _np.nditer(axs)):
+        if nrows == 1 and ncols == 1:
+            ax_linear_list = [axs]
+        elif nrows == 1 or ncols == 1:
+            ax_linear_list = axs.tolist()
+        else:
+            ax_linear_list = axs.flatten().tolist()
+
+        for key, ax in zip(keys, ax_linear_list):
             plot_meter(key, ax)
 
         output_folder = self.output_folder
         img_out = output_folder / f"{run_params.taskname}.png"
 
-        _plt.savefig(img_out, dpi=200)
+        _plt.savefig(img_out, dpi=100)
         _plt.close()
 
 

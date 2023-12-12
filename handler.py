@@ -169,7 +169,7 @@ class ModelHandler(_typing.Protocol):
     dataloader: _tc_data.DataLoader
     device: _torch.device
     callbacks: list[_typing.Callable[[_typing.Self], None]]
-    __privates: dict[str, _typing.Any]
+    _privates: dict[str, _typing.Any]
 
     def __init__(
         self,
@@ -195,7 +195,6 @@ class ModelHandler(_typing.Protocol):
         device : torch.device, default = device("cuda") | device("cpu")
             If cuda avilable, default is device("cuda") else device("cpu").
         """
-        assert train in ("train", "validate")
         self.train: bool = train
         self.run_params: RunParams = run_params
         self.dataloader: _tc_data.DataLoader = dataloader
@@ -203,7 +202,7 @@ class ModelHandler(_typing.Protocol):
         self.callbacks: list[_typing.Callable[[_typing.Self], None]] = (
             [] if callbacks is None else callbacks
         )
-        self.__privates: dict[str, _typing.Any] = {}
+        self._privates: dict[str, _typing.Any] = {}
 
     def __len__(self) -> int:
         """
@@ -352,18 +351,30 @@ class Meter:
             self.summary_type = summary_type
 
         def add(self, value: float | tuple[float, float]):
+            """
+            Parameters
+            ---
+            value : float | tuple[float, float]
+                value or (value, weight)
+            """
             if isinstance(value, float):
-                self.__values.append(value)
+                self.__values.append(float(value))
                 self.__weights.append(1)
             elif isinstance(value, tuple) and len(value) == 2:
                 value, weight = value
-                self.__values.append(value)
-                self.__weights.append(weight)
+                self.__values.append(float(value))
+                self.__weights.append(float(weight))
             else:
                 raise ValueError(value)
             return self
 
         def __iadd__(self, value: float | tuple[float, float]):
+            """
+            Parameters
+            ---
+            value : float | tuple[float, float]
+                value or (value, weight)
+            """
             return self.add(value)
 
         @property
@@ -538,19 +549,20 @@ class ImageClassifyHandler(ModelHandler, _typing.Protocol):
     @property
     def meter(self) -> Meter:
         key = "meter"
-        if key not in self.__privates:
+        if key not in self._privates:
             new_meter = Meter()
-            self.__privates[key] = new_meter
+            self._privates[key] = new_meter
             self.meters.append(new_meter)
-        return self.__privates[key]
+        return self._privates[key]
 
     @meter.setter
     def meter(self, new_meter):
         key = "meter"
-        self.__privates[key] = new_meter
+        self._privates[key] = new_meter
         self.meters.append(new_meter)
 
     def do_epoch(self):
+        self.meter = Meter()
         meter = self.meter
 
         meter.add_meter("model", fmt=":6.3f")  # time of model dealing the Tensor
@@ -567,15 +579,11 @@ class ImageClassifyHandler(ModelHandler, _typing.Protocol):
             dataloader, desc=f"{run_params.taskname}[{run_params.epoch}]"
         )
 
-        for batch_data in dataloader:
-            # move data to the same device as model
-            images, target = batch_data
-            images: _torch.Tensor = images.to(self.device, non_blocking=True)
-            target: _torch.Tensor = target.to(self.device, non_blocking=True)
+        for batch_data in bar_dataloader:
             meter["load"] += _time.time() - time_anchor
 
             # batch_train
-            loss = self.iteration_forward(images, target)
+            loss = self.iteration_forward(batch_data)
             self.iteration_backward(loss)
 
             # measure elapsed time
@@ -604,13 +612,15 @@ class ImageClassifyHandler(ModelHandler, _typing.Protocol):
         loss : Tensor
             return loss, for backward.
         """
+        # move data to the same device as model
         images, target = batch_data
+        images: _torch.Tensor = images.to(self.device, non_blocking=True)
+        target: _torch.Tensor = target.to(self.device, non_blocking=True)
         run_params = self.run_params
         meter = self.meter
 
         model: _nn.Module = run_params.model
         criterion: _nn.Module = run_params.criterion
-        device: _torch.device = device
 
         # compute output
         output = model(images)

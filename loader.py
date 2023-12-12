@@ -123,9 +123,11 @@ class FixedNumberDataset(Dataset):
 
     def __getitem__(self, index: int):
         raw_len = self.raw_len
+        if index >= self.fixed_length:
+            raise ValueError(f"index out of range")
         match self.sample:
             case "cycle":
-                return self.dataset[index * (self.fixed_length - 1) // (raw_len - 1)]
+                return self.dataset[index * (raw_len - 1) // (self.fixed_length - 1)]
             case "random":
                 return self.dataset[random.randint(0, raw_len - 1)]
             case x:
