@@ -1,15 +1,9 @@
-from typing import (
-    Any,
-    Callable,
-    Literal,
-    Optional,
-    TypeAlias,
-)
+import typing as _typing
+
 from pathlib import Path
 import random
 from itertools import chain
 
-import torch
 import torch.nn as nn
 import torch.nn.parallel
 import torch.optim
@@ -21,257 +15,9 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Dataset, BatchSampler
 
-from .constants import Directions
-
-
-def get_model(
-    name: Literal["resnet50", "resnet50_pre"]
-    | tuple[Literal["eval", "dict"], str, Path] = "resnet50",
-    grad: Literal[None, "only_fc"] = None,
-    num_classes=65,
-):
-    match name:
-        case "resnet50_pre":
-            params = torch.load(Directions.pretrained_models / "resnet50-19c8e357.pth")
-            model = models.resnet50()
-            model.load_state_dict(params)
-            if not model.fc.out_features == num_classes:
-                cnn_features = model.fc.in_features
-                model.fc = torch.nn.Sequential(
-                    nn.Linear(cnn_features, num_classes, bias=True).cuda()
-                )
-        case str():
-            model = getattr(models, name)(num_classes=num_classes)
-        case "eval", str(), Path():
-            _, arch, path_ = name
-            model: nn.Module = torch.load(path_)
-            model.eval()
-        case "dict", str(), Path():
-            _, arch, path_ = name
-            params = torch.load(path_)
-            model = getattr(models, arch)()
-            model.load_state_dict(params)
-        case _:
-            print(name)
-            raise ValueError()
-
-    match grad:
-        case None:
-            pass
-        case "only_fc":
-            for param in model.parameters():
-                param.requires_grad = False
-            cnn_features = model.fc.in_features
-            model.fc = nn.Sequential(nn.Linear(cnn_features, num_classes, bias=True))
-
-    model = model.cuda()
-    return model
-
-
-def get_dataloader(
-    name: Literal[
-        "sa_art",
-        "sa_clipart",
-        "sa_product",
-        "sa_realworld",
-        "t_art",
-        "t_product",
-        "t_realworld",
-        "t_clipart",
-        "art2product",
-        "art2realworld",
-        "clipart2art",
-    ],
-    batch_size: int,
-    num_workers: int,
-) -> DataLoader:
-    match name:
-        case "t_art":
-            dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "art_test",
-                "no_crop",
-                fixed_length=None,
-                sample="cycle",
-            )
-            dataloader = _as_one_dataloader(dataset, batch_size, num_workers, True)
-        case "t_product":
-            dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "product_test",
-                "no_crop",
-                fixed_length=None,
-                sample="cycle",
-            )
-            dataloader = _as_one_dataloader(dataset, batch_size, num_workers, True)
-        case "t_realworld":
-            dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "realworld_test",
-                "no_crop",
-                fixed_length=None,
-                sample="cycle",
-            )
-            dataloader = _as_one_dataloader(dataset, batch_size, num_workers, True)
-        case "t_clipart":
-            dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "clipart_test",
-                "no_crop",
-                fixed_length=None,
-                sample="cycle",
-            )
-            dataloader = _as_one_dataloader(dataset, batch_size, num_workers, True)
-
-        case "art2product":
-            source_dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "art_train_e5_a",
-                "filp_aug",
-                fixed_length=7000,
-                sample="random",
-            )
-            target_dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "product_test",
-                "no_crop",
-                fixed_length=7000,
-                sample="random",
-            )
-            dataloader = _as_multi_dataloader(
-                source_dataset,
-                target_dataset,
-                batch_size=batch_size,
-                num_workers=num_workers,
-            )
-        case "art2realworld":
-            source_dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "art_train_e5_a",
-                "filp_aug",
-                fixed_length=7000,
-                sample="random",
-            )
-            target_dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "realworld_test",
-                "no_crop",
-                fixed_length=7000,
-                sample="random",
-            )
-            dataloader = _as_multi_dataloader(
-                source_dataset,
-                target_dataset,
-                batch_size=batch_size,
-                num_workers=num_workers,
-            )
-        case "clipart2art":
-            source_dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "clipart_train_e5_a",
-                "no_crop_aug",
-                fixed_length=7000,
-                sample="random",
-            )
-            target_dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "art_test",
-                "no_crop",
-                fixed_length=7000,
-                sample="random",
-            )
-            dataloader = _as_multi_dataloader(
-                source_dataset,
-                target_dataset,
-                batch_size=batch_size,
-                num_workers=num_workers,
-            )
-
-        case "sa_art":
-            dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "art_train_e5_a",
-                "filp_aug",
-                fixed_length=7000,
-                sample="random",
-            )
-            dataloader = _as_one_dataloader(dataset, batch_size, num_workers, True)
-        case "sa_clipart":
-            dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "clipart_train_e5_a",
-                "no_crop_aug",
-                fixed_length=7000,
-                sample="random",
-            )
-            dataloader = _as_one_dataloader(dataset, batch_size, num_workers, True)
-        case "sa_product":
-            dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "product_train_e5_a",
-                "filp_aug",
-                fixed_length=7000,
-                sample="random",
-            )
-            dataloader = _as_one_dataloader(dataset, batch_size, num_workers, True)
-        case "sa_realworld":
-            dataset = FixedNumberDataset.load_imgfolder(
-                Directions.dataset / "realworld_train_e5_a",
-                "filp_aug",
-                fixed_length=7000,
-                sample="random",
-            )
-            dataloader = _as_one_dataloader(dataset, batch_size, num_workers, True)
-
-        case err:
-            raise ValueError(str(err))
-
-    return dataloader
-
-
-def get_optimizer(
-    model: models.ResNet,
-    learning_rate: float = 0.001,
-    momentum: float = 0.9,
-    weight_decay: float = 1e-4,
-    flag: str = "half_conv_learning_rate",
-):
-    if flag == "half_conv_learning_rate":
-        return torch.optim.SGD(
-            (
-                {
-                    "params": (
-                        filter(
-                            lambda x: (
-                                all(i is not x for i in model.fc.parameters())
-                                and x.requires_grad
-                            ),
-                            model.parameters(),
-                        )
-                    )
-                },
-                {"params": model.fc.parameters(), "lr": learning_rate},
-            ),
-            learning_rate / 10,
-            momentum=momentum,
-            weight_decay=weight_decay,
-        )
-
-
-def _as_one_dataloader(
-    dataset: Dataset, batch_size: int, num_workers: int, shuffle=True
-) -> DataLoader:
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=True,
-        sampler=None,
-    )
-    return dataloader
-
-
-def _as_multi_dataloader(*datasets_: Dataset, batch_size: int, num_workers: int):
-    dataset = MultiDataset(*datasets_)
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_sampler=MultiBatchSampler(dataset, batch_size, drop_last=False),
-        num_workers=num_workers,
-        pin_memory=True,
-    )
-    return dataloader
-
 
 class FixedNumberDataset(Dataset):
-    _t_enbadded_trans: TypeAlias = Literal[
+    _t_enbadded_trans: _typing.TypeAlias = _typing.Literal[
         "no_crop", "no_crop_aug", "keep_ratio", "filp_aug", "aff_aug", "auto_aug"
     ]
 
@@ -343,12 +89,12 @@ class FixedNumberDataset(Dataset):
     def load_imgfolder(
         cls,
         root: str,
-        transform: Optional[Callable | _t_enbadded_trans] = None,
-        target_transform: Optional[Callable] = None,
-        loader: Callable[[str], Any] = default_loader,
-        is_valid_file: Optional[Callable[[str], bool]] = None,
+        transform: _typing.Optional[_typing.Callable | _t_enbadded_trans] = None,
+        target_transform: _typing.Optional[_typing.Callable] = None,
+        loader: _typing.Callable[[str], _typing.Any] = default_loader,
+        is_valid_file: _typing.Optional[_typing.Callable[[str], bool]] = None,
         fixed_length: int = 7000,
-        sample: Literal["cycle", "random"] = "cycle",
+        sample: _typing.Literal["cycle", "random"] = "cycle",
     ):
         if isinstance(transform, str):
             transform = cls.get_trans(transform)
@@ -361,7 +107,7 @@ class FixedNumberDataset(Dataset):
         self,
         dataset: Dataset,
         fixed_length: int | None = 7000,
-        sample: Literal["cycle", "random"] = "cycle",
+        sample: _typing.Literal["cycle", "random"] = "cycle",
     ) -> None:
         super().__init__()
         self.dataset: Dataset = dataset
@@ -384,6 +130,7 @@ class FixedNumberDataset(Dataset):
                 return self.dataset[random.randint(0, raw_len - 1)]
             case x:
                 raise ValueError(x)
+
 
 
 class MultiDataset(Dataset):
