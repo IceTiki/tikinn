@@ -350,7 +350,7 @@ class Meter:
             self.alias = alias
             self.summary_type = summary_type
 
-        def add(self, value: float | tuple[float, float]):
+        def add(self, value: float | tuple[float, float]) -> _typing.Self:
             """
             Parameters
             ---
@@ -368,7 +368,7 @@ class Meter:
                 raise ValueError(value)
             return self
 
-        def __iadd__(self, value: float | tuple[float, float]):
+        def __iadd__(self, value: float | tuple[float, float]) -> _typing.Self:
             """
             Parameters
             ---
