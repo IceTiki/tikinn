@@ -11,6 +11,9 @@ from .handler import ModelHandler, ImageClassifyHandler
 
 
 class AutoPlot:
+    """
+    Support callback for `ImageClassifyHandler`.
+    """
     def __init__(self, output_folder: _pathlib.Path) -> None:
         self.output_folder = _pathlib.Path(output_folder)
         self.output_folder.mkdir(parents=True, exist_ok=True)
@@ -156,6 +159,9 @@ class AutoPlot:
 
 
 class AutoSave:
+    """
+    Support callback for `ModelHandler`.
+    """
     def __init__(self, save_folder: _pathlib.Path) -> None:
         self.save_folder = _pathlib.Path(save_folder)
         self.save_folder.mkdir(parents=True, exist_ok=True)

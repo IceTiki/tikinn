@@ -1,14 +1,14 @@
-from pathlib import Path
-import time
-import random
-import shutil
+import pathlib as _pathlib
+import time as _time
+import random as _random
+import shutil as _shutil
 
-import numpy as np
-import torch
+import numpy as _np
+import torch as _torch
 
 
 def fm_time() -> str:
-    time_struct = time.localtime()
+    time_struct = _time.localtime()
     date_str = (
         f"{time_struct.tm_year}-{time_struct.tm_mon:02d}-{time_struct.tm_mday:02d}"
     )
@@ -19,8 +19,8 @@ def fm_time() -> str:
 
 
 def indexing_imgfolder(
-    folder: str | Path, sample_range: tuple[float, float] = [0, 1]
-) -> dict[str, list[Path]]:
+    folder: str | _pathlib.Path, sample_range: tuple[float, float] = [0, 1]
+) -> dict[str, list[_pathlib.Path]]:
     """
     Parameters
     ---
@@ -34,7 +34,7 @@ def indexing_imgfolder(
     dict[str, list[Path]]
         key is label, value is list of imgpath
     """
-    folder = Path(folder)
+    folder = _pathlib.Path(folder)
 
     tree = {}
 
@@ -49,12 +49,12 @@ def indexing_imgfolder(
 
 
 class WorkFolder:
-    def __init__(self, work_stores_path: Path, work_name: str = "") -> None:
-        self.__work_stores_path: Path = work_stores_path
+    def __init__(self, work_stores_path: _pathlib.Path, work_name: str = "") -> None:
+        self.__work_stores_path: _pathlib.Path = work_stores_path
         self.__work_name: str = (
             f"#t={fm_time()}#h={work_name}##" if work_name else f"#t={fm_time()}##"
         )
-        self.__work_path: Path = self.__work_stores_path / self.__work_name
+        self.__work_path: _pathlib.Path = self.__work_stores_path / self.__work_name
 
         self.work_root.mkdir(parents=True, exist_ok=True)
         self.model_save_folder.mkdir(parents=True, exist_ok=True)
@@ -80,13 +80,13 @@ class SetSeed:
         pass
 
     def __exit__(self, *args, **kwargs):
-        self.set_seed(time.time())
+        self.set_seed(_time.time())
 
     @staticmethod
     def set_seed(seed):
-        random.seed(seed)
-        np.random.seed(seed)  # numpy
-        torch.manual_seed(seed)  # CPU
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)  # GPU
-            torch.cuda.manual_seed_all(seed)  # multi-GPU
+        _random.seed(seed)
+        _np.random.seed(seed)  # numpy
+        _torch.manual_seed(seed)  # CPU
+        if _torch.cuda.is_available():
+            _torch.cuda.manual_seed(seed)  # GPU
+            _torch.cuda.manual_seed_all(seed)  # multi-GPU
