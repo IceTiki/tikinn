@@ -71,10 +71,21 @@ class WorkFolder:
     def model_save_folder(self):
         return self.__work_path / "models"
 
+    def mkdir(self, folder_path: _pathlib.Path) -> _pathlib.Path:
+        new_dir = self.__work_path / folder_path
+        new_dir.mkdir(exist_ok=True, parents=True)
+        return new_dir
+
+    def mkparent(self, file_path: _pathlib.Path) -> _pathlib.Path:
+        new_file = self.__work_path / file_path
+        new_file.parent.mkdir(exist_ok=True, parents=True)
+        return new_file
+
 
 class SetSeed:
-    def __init__(self, seed=114514) -> None:
+    def __init__(self, seed=114514, deterministic=True) -> None:
         self.set_seed(seed)
+        _torch.backends.cudnn.deterministic = deterministic
 
     def __enter__(self, *args, **kwargs):
         pass
