@@ -176,9 +176,7 @@ class ModelHandler(_typing.Protocol):
         train: bool,
         run_params: RunParams,
         dataloader: _tc_data.DataLoader,
-        device: _torch.device = _torch.device("cuda")
-        if _torch.cuda.is_available()
-        else _torch.device("cpu"),
+        device: _torch.device = None,
         callbacks: list[_typing.Callable[[_typing.Self], None]] = None,
     ) -> None:
         """
@@ -198,7 +196,14 @@ class ModelHandler(_typing.Protocol):
         self.train: bool = train
         self.run_params: RunParams = run_params
         self.dataloader: _tc_data.DataLoader = dataloader
-        self.device: _torch.device = device
+        if device is None:
+            self.device: _torch.device = (
+                _torch.device("cuda")
+                if _torch.cuda.is_available()
+                else _torch.device("cpu")
+            )
+        else:
+            self.device: _torch.device = device
         self.callbacks: list[_typing.Callable[[_typing.Self], None]] = (
             [] if callbacks is None else callbacks
         )
