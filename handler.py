@@ -29,7 +29,6 @@ class RunParams:
 
     _STATE_ATTR_KEY: tuple[str] = (
         "model",
-        "model",
         "optimizer",
         "criterion",
         "scheduler",

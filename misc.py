@@ -49,8 +49,10 @@ def indexing_imgfolder(
 
 
 class WorkFolder:
-    def __init__(self, work_stores_path: _pathlib.Path, work_name: str = "") -> None:
-        self.__work_stores_path: _pathlib.Path = work_stores_path
+    def __init__(
+        self, work_stores_path: _pathlib.Path | str, work_name: str = ""
+    ) -> None:
+        self.__work_stores_path: _pathlib.Path = _pathlib.Path(work_stores_path)
         self.__work_name: str = (
             f"#t={fm_time()}#h={work_name}##" if work_name else f"#t={fm_time()}##"
         )
